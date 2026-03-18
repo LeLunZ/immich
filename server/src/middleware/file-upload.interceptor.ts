@@ -5,6 +5,7 @@ import { transformException } from '@nestjs/platform-express/multer/multer/multe
 import { NextFunction, RequestHandler } from 'express';
 import multer from 'multer';
 import { createHash, randomUUID } from 'node:crypto';
+import { appendFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pipeline } from 'node:stream';
 import { Observable } from 'rxjs';
@@ -42,6 +43,7 @@ export class FileUploadInterceptor implements NestInterceptor {
     userProfile: RequestHandler;
     assetUpload: RequestHandler;
   };
+  private benchmarkLogPath: string | undefined;
 
   constructor(
     private reflect: Reflector,
@@ -50,6 +52,7 @@ export class FileUploadInterceptor implements NestInterceptor {
     private logger: LoggingRepository,
   ) {
     this.logger.setContext(FileUploadInterceptor.name);
+    this.benchmarkLogPath = process.env.IMMICH_UPLOAD_BENCHMARK || undefined;
 
     const instance = multer({
       fileFilter: this.fileFilter.bind(this),
@@ -120,11 +123,29 @@ export class FileUploadInterceptor implements NestInterceptor {
         size += chunk.length;
       });
 
+      const startTime = this.benchmarkLogPath ? performance.now() : 0;
+
       pipeline(file.stream, writeStream, (error) => {
         if (error) {
           hash?.destroy();
           return callback(error);
         }
+
+        if (this.benchmarkLogPath) {
+          const duration_ms = performance.now() - startTime;
+          const throughput_mbps = size > 0 ? (size / 1_048_576 / (duration_ms / 1000)) : 0;
+          const record =
+            JSON.stringify({
+              timestamp: new Date().toISOString(),
+              size_bytes: size,
+              duration_ms: Math.round(duration_ms * 100) / 100,
+              throughput_mbps: Math.round(throughput_mbps * 100) / 100,
+              fieldname: file.fieldname,
+              flush_enabled: process.env.IMMICH_FLUSH_WRITES !== 'false',
+            }) + '\n';
+          appendFile(this.benchmarkLogPath, record).catch(() => {});
+        }
+
         callback(null, {
           path,
           size,
